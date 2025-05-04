@@ -9,10 +9,11 @@ $cacheMaxSize = 3;      // cuántas páginas guardar en cache
 // datos de ejemplo: 1..100
 $data = range(1, $totalItems);
 
-// inicializa cache FIFO en sesión
-if (!isset($_SESSION['fifo_cache'])) {
-    $_SESSION['fifo_cache'] = [];   // pageNum => [items]
-    $_SESSION['fifo_queue'] = [];   // cola FIFO: la primera es la más vieja
+// inicializa cache LFU en sesión
+if (!isset($_SESSION['lfu_cache'])) {
+    $_SESSION['lfu_cache'] = [];   // pageNum => [items]
+    $_SESSION['lfu_freq'] = [];    // pageNum => frecuencia
+    $_SESSION['lfu_history'] = []; // historial de acceso para desempate
 }
 
 // página solicitada (?page=)
@@ -21,9 +22,10 @@ $page = min($page, ceil($totalItems/$perPage));
 
 // botón para reiniciar la cache
 if (isset($_GET['reset'])) {
-    $_SESSION['fifo_cache'] = [];
-    $_SESSION['fifo_queue'] = [];
-    header("Location: fifo_simulator.php" . ($page > 1 ? "?page=$page" : ""));
+    $_SESSION['lfu_cache'] = [];
+    $_SESSION['lfu_freq'] = [];
+    $_SESSION['lfu_history'] = [];
+    header("Location: lfu_simulator.php" . ($page > 1 ? "?page=$page" : ""));
     exit;
 }
 
@@ -35,31 +37,67 @@ function loadPage($page, $perPage, $data) {
 
 // comprueba el cache
 $hit = false;
-if (isset($_SESSION['fifo_cache'][$page])) {
-    // HIT: no se expulsa nada, solo señalamos el acierto
+if (isset($_SESSION['lfu_cache'][$page])) {
+    // HIT: aumentamos la frecuencia de uso
     $hit = true;
-    $pageData = $_SESSION['fifo_cache'][$page];
+    $pageData = $_SESSION['lfu_cache'][$page];
+    $_SESSION['lfu_freq'][$page]++;
+    
+    // Actualizar posición en historia para desempate
+    $pos = array_search($page, $_SESSION['lfu_history']);
+    if ($pos !== false) {
+        array_splice($_SESSION['lfu_history'], $pos, 1);
+    }
+    $_SESSION['lfu_history'][] = $page;
 } else {
     // MISS: cargamos y metemos en cache
     $hit = false;
     $pageData = loadPage($page, $perPage, $data);
 
-    // si la cache está llena, expulsamos FIFO
-    if (count($_SESSION['fifo_queue']) >= $cacheMaxSize) {
-        $oldest = array_shift($_SESSION['fifo_queue']);
-        unset($_SESSION['fifo_cache'][$oldest]);
+    // si la cache está llena, expulsamos LFU (menor frecuencia)
+    if (count($_SESSION['lfu_cache']) >= $cacheMaxSize) {
+        // Encontrar la página con menor frecuencia
+        $minFreq = PHP_INT_MAX;
+        $lfuPage = null;
+        
+        foreach ($_SESSION['lfu_freq'] as $pageNum => $freq) {
+            if ($freq < $minFreq) {
+                $minFreq = $freq;
+                $lfuPage = $pageNum;
+            } elseif ($freq == $minFreq) {
+                // Si hay empate en frecuencia, usamos FIFO para desempatar
+                $currentPos = array_search($pageNum, $_SESSION['lfu_history']);
+                $lfuPos = array_search($lfuPage, $_SESSION['lfu_history']);
+                
+                if ($currentPos < $lfuPos) {
+                    $lfuPage = $pageNum;
+                }
+            }
+        }
+        
+        // Expulsar la página con menor frecuencia
+        if ($lfuPage !== null) {
+            unset($_SESSION['lfu_cache'][$lfuPage]);
+            unset($_SESSION['lfu_freq'][$lfuPage]);
+        }
     }
-    // insertamos la nueva página al final de la cola
-    $_SESSION['fifo_queue'][] = $page;
-    $_SESSION['fifo_cache'][$page] = $pageData;
+    
+    // Insertamos la nueva página
+    $_SESSION['lfu_cache'][$page] = $pageData;
+    $_SESSION['lfu_freq'][$page] = 1; // Iniciar con frecuencia 1
+    $_SESSION['lfu_history'][] = $page;
 }
+
+// Obtener el evento de reemplazo
+$replacedPage = isset($_SESSION['replaced_page']) ? $_SESSION['replaced_page'] : null;
+$_SESSION['replaced_page'] = null; // Limpiar para el próximo uso
 
 ?>
 <!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="UTF-8">
-  <title>Paginación con Cache FIFO</title>
+  <title>Paginación con Cache LFU</title>
   <style>
     body { 
       font-family: 'Segoe UI', Arial, sans-serif; 
@@ -138,8 +176,15 @@ if (isset($_SESSION['fifo_cache'][$page])) {
       margin: 10px 0;
       padding: 10px;
       background: white;
-      border-left: 4px solid #e67e22;
+      border-left: 4px solid #3498db;
       border-radius: 4px;
+    }
+    .freq-bar {
+      display: inline-block;
+      height: 12px;
+      background: #3498db;
+      margin-left: 10px;
+      border-radius: 10px;
     }
     .hit { 
       color: #27ae60; 
@@ -160,7 +205,7 @@ if (isset($_SESSION['fifo_cache'][$page])) {
     }
     .btn {
       padding: 8px 15px;
-      background: #e67e22;
+      background: #3498db;
       color: white;
       border: none;
       border-radius: 4px;
@@ -170,7 +215,7 @@ if (isset($_SESSION['fifo_cache'][$page])) {
       transition: background 0.3s;
     }
     .btn:hover {
-      background: #d35400;
+      background: #2980b9;
     }
     .alg-switcher {
       text-align: center;
@@ -186,31 +231,31 @@ if (isset($_SESSION['fifo_cache'][$page])) {
       transition: all 0.3s;
     }
     .alg-switcher a.active {
-      background: #e67e22;
+      background: #2980b9;
       color: white;
     }
     .alg-switcher a:hover {
       background: #e0e0e0;
     }
     .alg-switcher a.active:hover {
-      background: #d35400;
+      background: #2573a7;
     }
   </style>
 </head>
 <body>
   <div class="container">
-    <h2>Simulador de Paginación con Cache FIFO</h2>
+    <h2>Simulador de Paginación con Cache LFU</h2>
     
     <div class="alg-switcher">
-      <a href="fifo_simulator.php<?php echo $page > 1 ? "?page=$page" : "" ?>" class="active">FIFO</a>
+      <a href="fifo_simulator.php<?php echo $page > 1 ? "?page=$page" : "" ?>">FIFO</a>
       <a href="lru_simulator.php<?php echo $page > 1 ? "?page=$page" : "" ?>">LRU</a>
-      <a href="lfu_simulator.php<?php echo $page > 1 ? "?page=$page" : "" ?>">LFU</a>
+      <a href="lfu_simulator.php<?php echo $page > 1 ? "?page=$page" : "" ?>" class="active">LFU</a>
       <a href="mfu_simulator.php<?php echo $page > 1 ? "?page=$page" : "" ?>">MFU</a>
     </div>
 
     <p>
-      <strong>FIFO (First In First Out):</strong> Reemplaza la página que ha estado más tiempo en el cache,
-      sin importar cuántas veces ha sido accedida.
+      <strong>LFU (Least Frequently Used):</strong> Reemplaza la página que se ha utilizado con menos frecuencia. 
+      En caso de empate, utiliza FIFO para determinar cuál se expulsa.
     </p>
 
     <p>
@@ -265,24 +310,29 @@ if (isset($_SESSION['fifo_cache'][$page])) {
     </div>
 
     <div class="cache">
-      <h3>Estado del Cache (FIFO: primera página en entrar → primera en salir)</h3>
+      <h3>Estado del Cache (LFU: expulsa la página menos frecuentemente usada)</h3>
       
-      <?php if (empty($_SESSION['fifo_cache'])): ?>
+      <?php if (empty($_SESSION['lfu_cache'])): ?>
         <p><em>El cache está vacío</em></p>
       <?php else: ?>
-        <div style="margin-bottom: 15px">
-          <strong>Cola FIFO:</strong>
-          <?php echo implode(' → ', $_SESSION['fifo_queue']) ?>
-        </div>
-        
-        <?php foreach ($_SESSION['fifo_cache'] as $p => $items): ?>
+        <?php foreach ($_SESSION['lfu_cache'] as $p => $items): ?>
           <div class="cache-item">
             <strong>Página <?php echo $p ?></strong>
+            <span style="float:right">
+              Frecuencia: <strong><?php echo $_SESSION['lfu_freq'][$p] ?></strong>
+              <span class="freq-bar" style="width: <?php echo min($_SESSION['lfu_freq'][$p] * 10, 100) ?>px"></span>
+            </span>
+            <div style="clear:both"></div>
             <div>[ <?php echo implode(', ', $items) ?> ]</div>
           </div>
         <?php endforeach; ?>
+        
+        <div style="margin-top: 15px">
+          <strong>Orden de insercción (FIFO para desempate):</strong>
+          <?php echo implode(' → ', $_SESSION['lfu_history']) ?>
+        </div>
       <?php endif; ?>
     </div>
   </div>
 </body>
-</html>
+</html> 
